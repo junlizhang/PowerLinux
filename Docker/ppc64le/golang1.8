@@ -1,0 +1,32 @@
+mkdir golang
+cd golang
+
+cat > golang-Dockerfile <<- 'EOF'
+FROM ppc64le/ubuntu:16.04
+MAINTAINER JunLi Zhang<junlizh@cn.ibm.com>
+
+RUN echo '' > /etc/resolv.conf && \
+  apt-get update && \
+  apt-get install -y --no-install-recommends ca-certificates curl wget bzr git mercurial openssh-client subversion procps g++ gcc libc6-dev make && \
+  rm -rf /var/lib/apt/* /var/cache/apt/*
+
+ENV GOLANG_DOWNLOAD_URL=http://172.16.15.29/ftp/go/go1.8.tar.gz
+ENV GOLANG_VERSION=1.8
+ENV GOROOT_BOOTSTRAP=/tmp/go
+
+RUN \
+  curl -fsSL http://172.16.15.29/ftp/docker/ppc64el/ubuntu/14_04/cloud-foundry/go-1.6.2-ppc64le.tar.gz -o golang-1.6.2.tar.gz && \
+  tar -C /tmp -xzf golang-1.6.2.tar.gz && \
+  curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz && \
+  tar -C /usr/local -xzf golang.tar.gz && \
+  ln -s /usr/local/go-go1.8 /usr/local/go && \
+  cd /usr/local/go/src && ./make.bash && \
+  cd / && rm golang*.tar.gz && \
+  rm -rf /tmp/go
+
+ENV GOPATH=/go
+ENV PATH=/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
+EOF
+
+docker build -t ppc64le/golang:1.8 -f golang-Dockerfile .
