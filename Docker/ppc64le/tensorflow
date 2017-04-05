@@ -1,0 +1,148 @@
+mkdir tensorflow
+cd tensorflow
+
+cat > tesorflow-deps-Dockerfile <<- 'EOF'
+FROM ppc64le/centos-cuda-devel:8.0  
+MAINTAINER Junli Zhang <junlizh@cn.ibm.com>
+
+RUN \
+  yum -y update && \
+  yum -y install \
+    java-1.8.0-openjdk \
+    java-1.8.0-openjdk-devel \
+    java-1.8.0-openjdk-headless \
+    curl-devel \
+    gcc gcc-c++ gcc-gfortran \
+    swig giflib giflib-devel pcre-devel pcre \
+    python python-devel numpy python-matplotlib python-six python-pillow python-pip python-virtualenv python-wheel \
+    patch autoreconf automake libtool make libstdc++-static unzip zip \
+    atlas-devel zlib-devel libjpeg-turbo-devel && \
+  rm -rf /var/cache/yum/* 
+
+RUN \
+  wget -c ftp://172.16.15.29/hpc/protobuf/protobuf-3.2.0.tar.gz -O - | tar -xzf - && \
+  cd protobuf-3.2.0 && \
+  wget -c ftp://172.16.15.29/hpc/protobuf/googlemock-release-1.7.0.tar.gz -O - | tar -xzf - && \
+  mv googlemock-release-1.7.0 gmock && \
+  wget -c ftp://172.16.15.29/hpc/protobuf/googletest-release-1.7.0.tar.gz -O - | tar -xzf - && \
+  mv googletest-release-1.7.0 gmock/gtest && \
+  autoreconf -f -i -Wall,no-obsolete &&\
+  ./configure CFLAGS=-fPIC CXXFLAGS=-fPIC --disable-shared && \
+  make -j8 install && \
+  rm -rf /protobuf-3.2.0
+
+#RUN \
+#  wget -c ftp://172.16.15.29/hpc/protobuf/grpc-java-1.1.2.tar.gz -O - | tar -xzf - && \
+#  cd grpc-java-1.1.2 && \
+#  sed -i.ori 's|distributionUrl=.*|distributionUrl=ftp\\://172.16.15.29/hpc/protobuf/gradle-3.2-bin.zip|g' gradle/wrapper/gradle-wrapper.properties && \
+#  wget -c ftp://172.16.15.29/hpc/protobuf/gradle.tar.gz -O - | tar -xzf - && \
+#  mv .gradle ~/ && \
+#  ./gradlew java_pluginExecutable -Pprotoc=$(which protoc) && \
+#  rm -rf /grpc-java-1.1.2
+#  cp compiler/build/exe/java_plugin/protoc-gen-grpc-java /usr/local/bin
+
+# ENV PROTOC /usr/local/bin/protoc
+# ENV GRPC_JAVA_PLUGIN /usr/local/bin/protoc-gen-grpc-java
+# ENV JAVA_HOME /usr/lib/jvm/java
+# ENV PATH $JAVA_HOME/bin:$PATH
+RUN \
+  wget -c ftp://172.16.15.29/hpc/protobuf/bazel-0.4.4-dist.zip && \
+  unzip bazel-0.4.4-dist.zip -d bazel-0.4.4 && \
+  rm -f bazel-0.4.4-dist.zip && \
+  cd bazel-0.4.4 && \
+  JAVA_HOME=/usr/lib/jvm/java PATH=$JAVA_HOME/bin:$PATH bash ./compile.sh && \
+  cp output/bazel /usr/local/bin/ && \
+  rm -rf /bazel-0.4.4
+EOF
+
+docker build -t ppc64le/tensorflow-deps:1.0.1 -f tesorflow-deps-Dockerfile .
+
+cat > tesorflow-Dockerfile <<- 'EOF'
+FROM ppc64le/tensorflow-deps:1.0.1 
+MAINTAINER Junli Zhang <junlizh@cn.ibm.com>
+
+WORKDIR /root
+
+# ENV HTTPS_PROXY http://172.16.15.29:8080
+# ENV HTTP_PROXY http://172.16.15.29:8080
+# cat WORKSPACE.ori ./tensorflow/workspace.bzl.ori | grep -o http.*://.*$ | sed 's/",//g' | sort | while read i
+# do
+#   #wget -t 30 -c --mirror "$i"
+#   tmp_dir=$(dirname $i|sed 's|http.*://||g')
+#   if [ ! -f $tmp_dir/complete ]; then
+#     wget -t 30 -c -r -np -k "$i" && echo '' > $tmp_dir/complete
+#   fi
+# done 
+RUN \
+  wget -c ftp://172.16.15.29/hpc/protobuf/tensorflow-1.0.1.tar.gz -O - | tar -xzf - && \
+  cd tensorflow-1.0.1 && \
+  sed -i.ori -e 's|http.*://\(.*$\)|http://172.16.15.29/ftp/hpc/tensorflow/deps/\1|g' WORKSPACE ./tensorflow/workspace.bzl && \
+  TF_NEED_GCP=0 \
+  TF_NEED_HDFS=0 \
+  TF_NEED_OPENCL=0 \
+  TF_NEED_CUDA=1 \
+  GCC_HOST_COMPILER_PATH=/usr/bin/gcc \
+  CC_OPT_FLAGS="-O2 -mcpu=power8 -mtune=power8" \
+  TF_NEED_JEMALLOC=1 \
+  TF_ENABLE_XLA=0 \
+  TF_CUDA_VERSION=8.0 \
+  CUDA_TOOLKIT_PATH=/usr/local/cuda-8.0 \
+  TF_CUDNN_VERSION=5 \
+  CUDNN_INSTALL_PATH=/usr/local/cuda-8.0 \
+  TF_CUDA_COMPUTE_CAPABILITIES=3.0,3.5,3.7,5.0,5.2,6.0,6.1 \
+  PYTHON_BIN_PATH=/usr/bin/python \
+  USE_DEFAULT_PYTHON_LIB_PATH=1 \
+  LD_LIBRARY_PATH=/usr/local/cuda-8.0/extras/CUPTI/lib64:$LD_LIBRARY_PATH \
+  ./configure && \
+  bazel build -c opt --config=cuda //tensorflow/tools/pip_package:build_pip_package && \
+  bazel-bin/tensorflow/tools/pip_package/build_pip_package /opt/pip && \
+  cd /root && rm -rf /tmp/* .cache tensorflow-1.0.1
+
+RUN \
+  mkdir -p /root/.pip && \
+  echo '[global]'                                                    > /root/.pip/pip.conf && \
+  echo 'index-url=http://172.16.15.29/ftp/pypi/mirror/web/simple' >> /root/.pip/pip.conf && \
+  echo '[install]'                                                  >> /root/.pip/pip.conf && \
+  echo 'trusted-host=172.16.15.29'                                  >> /root/.pip/pip.conf && \
+  cd /opt && \
+  wget -c ftp://172.16.15.29/hpc/tensorflow/tensorflow-virtenv.tar.gz -O - | tar -xzf - && \
+  cd tensorflow-virtenv && \
+  source bin/activate && \
+  pip install --no-cache-dir --disable-pip-version-check --upgrade /opt/pip/tensorflow-*.whl && \
+  deactivate
+
+# RUN \
+#   mkdir -p /root/.pip && \
+#   virtualenv --system-site-packages /opt/tensorflow-virtenv && \
+#   cd /opt/tensorflow-virtenv && \
+#   source bin/activate && \
+#   pip install --no-cache-dir --disable-pip-version-check --upgrade pip && \
+#   pip install --no-cache-dir --disable-pip-version-check --upgrade setuptools && \
+#   pip install --no-cache-dir --disable-pip-version-check --upgrade wheel mock protobuf scipy && \ 
+#   pip install --no-cache-dir --disable-pip-version-check --upgrade /opt/pip/tensorflow-*.whl && \
+#   deactivate
+
+ENV VIRTUAL_ENV /opt/tensorflow-virtenv
+ENV PATH $VIRTUAL_ENV/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PYTHONPATH $VIRTUAL_ENV/lib64/python2.7/site-packages:$PYTHONPATH
+
+# TensorBoard
+EXPOSE 6006
+EOF
+
+docker build -t ppc64le/tensorflow:1.0.1 -f tesorflow-Dockerfile  .
+
+cat > demo.py << EOF
+import tensorflow as tf
+sess = tf.Session()
+hello_world = tf.constant("Hello, TensorFlow!")
+print sess.run(hello_world)
+print sess.run(tf.constant(123)*tf.constant(456))
+sess.close()
+quit()
+EOF
+
+nvidia-docker run --rm -ti -v $PWD:$PWD -w $PWD ppc64le/tensorflow:1.0.1 python demo.py
+
+nvidia-docker run --rm -ti -v $PWD:$PWD -w $PWD -e CUDA_VISIBLE_DEVICES="3" ppc64le/tensorflow:1.0.1 \
+python neural_style.py --content d.jpg --styles examples/2-style1.jpg --out d-mod-1.jpg
