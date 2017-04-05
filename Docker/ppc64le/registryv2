@@ -1,0 +1,53 @@
+rpm -ivh docker-distribution-2.3.0-2.ael7b.ppc64le.rpm
+systemctl enable docker-distribution.service
+systemctl start docker-distribution.service
+echo '{ "insecure-registries":["172.16.156.146:5000"] }' > /etc/docker/daemon.json && systemctl restart docker
+# On registry Server:
+#
+cat > /usr/local/bin/gen-img-idx <<- 'EOF'
+cat > /var/www/html/index.html <<- HTML
+<html>
+<head>
+<title>Docker Images</title>
+</head>
+<body>
+<table>
+$(
+find /var/lib/registry/docker/registry/v2/repositories -name tags|while read i
+do
+  echo "<tr><td>"
+  echo "$(echo $i | sed -e 's:/var/lib/registry/docker/registry/v2/repositories/::g' -e 's:/_manifests/tags::g') : $(ls $i|tr '\n' ' ')"
+  echo "</td></tr>"
+done
+)
+</table>
+</body>
+</html>
+HTML
+EOF
+chmod a+x /usr/local/bin/gen-img-idx 
+
+cat > /etc/cron.d/docker-images <<- EOF
+*/5 * * * * root /usr/local/bin/gen-img-idx 
+EOF
+systemctl restart crond.service
+#
+# find /var/lib/registry/docker/registry/v2/repositories -name tags|while read i
+# do
+# cat <<-EOF
+# $(echo $i | sed -e 's:/var/lib/registry/docker/registry/v2/repositories/::g' -e 's:/_manifests/tags::g') :
+#    $(ls $i|tr '\n' ' ')
+# EOF
+# done
+
+# On docker client:
+#
+# cat >  /etc/docker/daemon.json <<- EOF
+# { "insecure-registries":["172.16.156.146:5000"] }
+# EOF
+# systemctl restart docker.service
+#
+# docker tag hpc 172.16.156.146:5000/hpc
+# docker push 172.16.156.146:5000/hpc
+# curl -X GET http://172.16.156.146:5000/v2/_catalog
+# curl -X GET http://172.16.156.146:5000/v2/hpc/tags/list
