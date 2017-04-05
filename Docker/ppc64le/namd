@@ -1,0 +1,151 @@
+mkdir namd
+cd namd
+
+cat > cmp-namd.sh <<- 'CMP_NAMD_SCRIPT'
+yum -y update 
+yum -y install fftw3-devel tcl-devel make csh
+rm -rf /var/cache/yum/* 
+
+wget -c ftp://172.16.15.29/hpc/namd/NAMD_2.12_Source.tar.gz -O - |tar xzf -
+cd NAMD_2.12_Source
+tar xf charm-6.7.1.tar
+cd charm-6.7.1
+./build charm++ multicore-linux-ppc gcc -O -DCMK_OPTIMIZE
+./build charm++ multicore-linux-ppc xlc64 -O -DCMK_OPTIMIZE
+cd ..
+
+cat > arch/Linux-POWER-xlC.arch <<- 'EOF'
+NAMD_ARCH = Linux-POWER
+CHARMARCH = multicore-linux-ppc-xlc64
+CXX = xlC_r -w
+CXXOPTS = -O -qnohot -qstrict -qaggrcopy=nooverlap -qalias=ansi -qarch=auto -qtune=auto -qfloat=rsqrt -DARCH_POWERPC
+CXXNOALIASOPTS = -O3 -qaggrcopy=nooverlap -qalias=noallptrs -qarch=auto -qtune=auto -qfloat=rsqrt -DARCH_POWERPC
+CXXTHREADOPTS = -O -qstrict -qaggrcopy=nooverlap -qalias=ansi -qarch=auto -qtune=auto -qfloat=rsqrt -DARCH_POWERPC
+CC = xlc_r -w
+EOF
+
+cat > arch/Linux-POWER-g++.arch <<- 'EOF'
+NAMD_ARCH = Linux-POWER
+CHARMARCH = multicore-linux-ppc-gcc
+CXX = g++ -m64 -O3 -std=c++11 -mcpu=power8 -mtune=power8
+CXXOPTS = -fexpensive-optimizations -ffast-math
+CC = gcc -m64 -O3 -mcpu=power8 -mtune=power8
+COPTS = -fexpensive-optimizations -ffast-math
+EOF
+
+cat > arch/Linux-POWER.cuda <<- 'EOF'
+CUDADIR=/usr/local/cuda
+CUDAINCL=-I$(CUDADIR)/include
+CUBDIR=.rootdir/cub
+CUBINCL=-I$(CUBDIR)
+CUDALIB=-L$(CUDADIR)/lib64 -lcudart -lrt -lcufft
+CUDASODIR=$(CUDADIR)/lib64
+LIBCUDARTSO=
+CUDAFLAGS=-DNAMD_CUDA
+CUDAOBJS=$(CUDAOBJSRAW)
+CUDA=$(CUDAFLAGS) -I. $(CUDAINCL) $(CUBINCL)
+CUDACC=$(CUDADIR)/bin/nvcc -O3 --maxrregcount 48 $(CUDAGENCODE) $(CUDA)
+CUDAGENCODE=-gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35 -gencode arch=compute_37,code=sm_37 -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_60,code=compute_60
+EOF
+
+cat > arch/Linux-POWER.fftw3 <<- 'EOF'
+FFTDIR=
+FFTINCL=/usr/include
+FFTLIB=-L/usr/lib64 -lfftw3f
+FFTFLAGS=-DNAMD_FFTW -DNAMD_FFTW_3
+FFT=$(FFTINCL) $(FFTFLAGS)
+EOF
+
+cat > arch/Linux-POWER.tcl <<- 'EOF'
+TCLDIR=
+TCLINCL=-I/usr/include
+TCLLIB=-L/usr/lib64 -ltcl8.5 -ldl -lpthread
+TCLFLAGS=-DNAMD_TCL
+TCL=$(TCLINCL) $(TCLFLAGS)
+EOF
+
+./config Linux-POWER-g++ --charm-arch multicore-linux-ppc-gcc --with-tcl --with-fftw3 --with-cuda
+cd Linux-POWER-g++
+make -j8
+cd ..
+
+patch -p0 ./src/MoleculeQM.C <<- EOF
+1367c1367
+<         qmPCVecMap.insert(std::pair<Real,std::vector<int>>(
+---
+>         qmPCVecMap.insert(std::pair<Real,std::vector<int> >(
+EOF
+./config Linux-POWER-xlC --charm-arch multicore-linux-ppc-xlc64 --with-tcl --with-fftw3 --with-cuda
+cd Linux-POWER-xlC
+make -j8
+cd ..
+CMP_NAMD_SCRIPT
+
+cat > namd-Dockerfile <<- 'EOF'
+FROM ppc64le/hpc:1.0  
+MAINTAINER Junli Zhang <junlizh@cn.ibm.com>
+
+ADD cmp-namd.sh /root/cmp-namd.sh
+
+RUN \
+  yum -y update && \
+  yum -y install numactl hwloc && \
+  rm -rf /var/cache/yum/*
+
+RUN bash /root/cmp-namd.sh
+
+ENV PATH /NAMD_2.12_Source/Linux-POWER-g++:$PATH
+EOF
+
+nvidia-docker build -t ppc64le/namd:2.12 -f namd-Dockerfile .
+
+nvidia-smi -pm 1
+nvidia-smi -rac
+nvidia-smi -acp 0
+M_HZ=$(nvidia-smi --query-supported-clocks=memory --format=csv|grep -v memory|sort -n -r|head -1|cut -f1 -d' ')
+G_HZ=$(nvidia-smi --query-supported-clocks=graphics --format=csv|grep -v graphics|head -1|cut -f1 -d' ')
+nvidia-smi -ac ${M_HZ},${G_HZ}
+##nvidia-smi dmon
+
+wget ftp://172.16.15.29/hpc/namd/zju_benchmark_test.tar.gz -O - | tar -xzf -
+
+echo 0 > /proc/sys/kernel/randomize_va_space
+
+nvidia-docker run -d --name cn01 -h cn01 -ti -p 2222:22 -v $PWD/zju_benchmark_test:/opt/zju_benchmark_test -w /opt/zju_benchmark_test ppc64le/namd:2.12
+
+nvidia-docker exec -ti cn01 /bin/bash -c 'nvidia-smi && env'
+
+ssh localhost -p 2222 env
+
+nvidia-docker rm -f cn01
+
+#http://www.nvidia.com/object/gpu-accelerated-applications-namd-running-jobs.html
+
+nvidia-docker run \
+   --privileged \
+   --rm -ti \
+   -v $PWD/zju_benchmark_test:/opt/zju_benchmark_test \
+   -w /opt/zju_benchmark_test \
+   ppc64le/namd:2.12 \
+   numactl -N 0 -m 0 \
+   namd2 +p10 +idlepoll +devices 0,1 namd.conf \
+   | tee k80_0_1.log
+
+nvidia-docker run \
+   --privileged \
+   --rm -ti \
+   -v $PWD/zju_benchmark_test:/opt/zju_benchmark_test \
+   -w /opt/zju_benchmark_test \
+   ppc64le/namd:2.12 \
+   numactl -N 8 -m 8 \
+   namd2 +p10 +idlepoll +devices 2,3 namd.conf \
+   | tee k80_2_3.log
+
+nvidia-docker run \
+   --privileged \
+   --rm -ti \
+   -v $PWD/zju_benchmark_test:/opt/zju_benchmark_test \
+   -w /opt/zju_benchmark_test \
+   ppc64le/namd:2.12 \
+   namd2 +p20 +idlepoll +devices 0,1,2,3 namd.conf \
+   | tee k80_all.log
