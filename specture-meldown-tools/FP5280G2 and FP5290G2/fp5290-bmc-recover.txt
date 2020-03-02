@@ -1,0 +1,42 @@
+#FP5290G2恢复步骤
+现象描述：服务器无法启动，BMC网页无法登录，BMC可以ping通，可以通过ipmitool开关机。
+
+#恢复出厂设置（可选步骤）
+ipmitool -I lanplus -H $BMC_IP -U admin -P admin raw 0x32 0x66
+#然后安装DHCP服务器，并为BMC自动分配一个IP
+
+#登录BMC
+sshpass -p superuse ssh -l sysadmin $BMC_IP
+
+#防止BMC一直重启
+ /etc/init.d/watchdogapp.sh stop
+Stopping watchdog application ....
+ /etc/init.d/ipmistack stop
+Stopping IPMI Stack: IPMIMain.
+
+#上传PNOR和BMC到/var
+sshpass -p superuse scp \
+FP5290G2_BMC_General_3.5.0_20190620 \
+BMC_Tools.zip \
+sysadmin@$BMC_IP:/var/
+
+# 擦除芯片信息,从地址0一直擦除到地址1024
+/var # flash_erase /dev/mtd0 0 1024
+Erasing 64 Kibyte @ 3ff0000 -- 100% complete
+
+# 写入BMC信息
+dd if=FP5290G2_BMC_3.5.0_20190620 of=/dev/mtd0
+
+# 升级完重启
+reboot
+
+# 重新用DHCP为BMC分配一个IP，此时便可以通过web访问BMC了。
+
+# 在BMC网页中刷中间版本的PNOR，FP5290G2_BIOS_Transition_9.0.00_201xxxx
+
+# 关机重启
+
+# 在BMC网页中刷FP5290G2_BIOS_4.0.02_General_20190829.pnor，注意选择双镜像一起升级。
+
+# 关机重启
+
